@@ -17,10 +17,6 @@ The Other tasks run periodically and either collect information or report it out
 
 To DO:
 
-Add code in function "Iget" to implement current sensing. Function currently just returns 0 current. Needs to call ADCget(pin_Isense) and convert this ADC value to a current in milliamps.
-
-Add code in function "Vget" to implement voltage sensing. Currently returns 3200000 Startup code will need to be added in the BPSinit function to communicate with SPI. Another function will need to be written to handle charge-balancing.
-
 
 Edit "BPScheck" so that the temperature limit while charging is different than the temperature limit while discharging
 

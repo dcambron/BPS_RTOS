@@ -4,31 +4,37 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 /*BPS.def */
 /* BPS LIMIT SETPOINTS */
-#define LIMIT_CURRENT_HIGH           80000
+#define LIMIT_CURRENT_HIGH           4600
 #define LIMIT_CURRENT_LOW         (-40000)
-#define LIMIT_VOLTAGE_HIGH         3600000
-#define LIMIT_VOLTAGE_LOW          2500000
-#define LIMIT_TEMP_HIGH                 65
+#define LIMIT_VOLTAGE_HIGH         3800000
+#define LIMIT_VOLTAGE_LOW          2200000
+#define LIMIT_TEMP_HIGH                 30 /*65*/
 #define LIMIT_VOLTAGE_ARRAY_CUTON  3400000
 #define LIMIT_VOLTAGE_ARRAY_CUTOFF 3500000
 
 /* OTHER BPS SETTINGS*/
-#define MODULES_USED         20
+#define MODULES_USED         12
 #define MODULES_MAX          48
 #define RELAYON            HIGH
 #define RELAYOFF            LOW
 #define DURATION_PRECHARGE 2000
 #define DURATION_CHARGE    1000
 #define VREF                  5
-
+#define IGNORE_SENSOR_UNPLUG  1
+#define SSEG_RAW_ENABLE       1
+#define SIMULATE_VOLTAGE_READING 0
 //////////////////////////////////////////
 /*PIN ASSIGNMENTS FOR LEDS*/
-#define LED_GOOD    13
-#define LED_OV      12
-#define LED_UV      12
-#define LED_OT      12
-#define LED_OC      12
-#define LED_OTHER   13
+#define LED_GOOD    51
+#define LED_OV      50
+#define LED_UV      49
+#define LED_OT      48
+#define LED_OC      26
+#define LED_OTHER   46
+
+/*PIN ASSIGNMENTS FOR SSEG 30-37 , 38-45*/
+#define SSEG0       30
+#define SSEG1       38
 
 /*PIN ASSIGNMENTS FOR MUXES */
 #define MUXE0     6
@@ -42,6 +48,7 @@
 /*PIN ASSIGNMENTS FOR ADC */
 #define pin_Isense         A0
 #define pin_Tsense         A1
+#define pin_Iref           A2
 
 /*PIN ASSIGNMENTS FOR OUTPUT RELAYS */
 #define relay_main          9
@@ -58,6 +65,8 @@
 #define ERR_OTHER   5
 #define SSEG_NOTHING 0xFF
 #define LED_NOTHING  0xFF
+#define LIN_I2C_ADDR 10
+#define LIN_BOARD0_ADDR 0b00000000
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////end BPS_DEF.h////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -94,13 +103,15 @@ void     DISPLAYout(void);
    information from the different input sources. It also includes
    functions for handling the output relays, and onboard displays         */
 
-uint32_t Vget(uint8_t index);
+uint8_t * Vget(uint8_t board);
 int8_t   Tget(uint8_t index);
 int32_t  Iget(void);
+//int32_t  Icalib(void);
 void     MUXset(uint8_t index);
 void     CARstart(void);
 void     CARshutdown(uint8_t errorcd, uint8_t offender,uint32_t V, int8_t T, int32_t I);
 void     SSEGwrite(uint8_t val);
+void     SSEGwriteRAW(uint8_t code1, uint8_t code2);
 void     LEDwrite(uint8_t led);
 void     ARRAYcheck(uint8_t i);
 
@@ -136,12 +147,14 @@ PROGMEM int8_t Thash[] = {-128,-128,-128,-128,-128,-128,-128,-128,-128,-128,-128
 */
 void BPSinit(void) {
    int i = 0;
-   const uint8_t pins[] = {MUXE0,MUXE1,MUXE2,MUXS0,MUXS1,MUXS2,MUXS3,LED_OV,LED_UV,LED_OT,LED_OC,LED_OTHER,LED_GOOD};
+   const uint8_t pins[] = {MUXE0,MUXE1,MUXE2,MUXS0,MUXS1,MUXS2,MUXS3,LED_OV,LED_UV,LED_OT,LED_OC,LED_OTHER,LED_GOOD,relay_main,relay_array,relay_precharge,SSEG0,SSEG0 + 1,SSEG0 + 2, SSEG0 + 3, SSEG0 + 4, SSEG0 + 5, SSEG0 + 6, SSEG0 + 7,SSEG1,SSEG1 + 1,SSEG1 + 2, SSEG1 + 3, SSEG1 + 4, SSEG1 + 5, SSEG1 + 6, SSEG1 + 7};
 
    //Serial.begin(9600);
    //analogReference(INTERNAL);
 
    //low = enabled
+   digitalWrite(relay_main, LOW);
+  digitalWrite(relay_array, LOW);  
    digitalWrite(MUXE0, HIGH); 
    digitalWrite(MUXE1, HIGH); 
    digitalWrite(MUXE2, HIGH);
@@ -151,7 +164,7 @@ void BPSinit(void) {
    }
 
    Wire.begin();
-   I2Ctx(0x40, 0x00, 0x00, 0x00);
+   //I2Ctx(0x40, 0x00, 0x00, 0x00);
 
    return;
 }
@@ -159,10 +172,11 @@ void BPSinit(void) {
 void BPScheck(void) {
    uint8_t i;
    for(i=0;i<BPS.num_modules;i++){
+       if(ERR.error != ERR_NONE) {continue;}
       //check the array
       ARRAYcheck(i);
       //check volts, temps, and currents
-      if(BPS.T[i] == -128 || BPS.V[i] == 0) {
+      if(!(IGNORE_SENSOR_UNPLUG) && (BPS.T[i] == -128 || BPS.V[i] == 0)) {
          CARshutdown(ERR_OTHER,i,BPS.V[i],BPS.T[i],BPS.I);
       }
 
@@ -241,12 +255,26 @@ void DISPLAYout(void) {
    ARRAYcheck
 */
 
-uint32_t Vget(uint8_t index) {
-   uint32_t result = 3200000;
-   //query MCP register using SPI
-   //convert to microVolts
+uint8_t * Vget(uint8_t board) {
+   static uint8_t vraw[32];
+   
+   //query Linduino using I2C
+   Wire.beginTransmission(LIN_I2C_ADDR);
+   Wire.write((0b11000000) | board);
+   Wire.endTransmission();
+   //receive response
+   //for(int i = 0; i< 40000; i++);
+   delay(5);
+   Wire.beginTransmission(LIN_I2C_ADDR);
+   Wire.requestFrom(LIN_I2C_ADDR, 32); 
+   for (int i = 0; i < 32; i++) {
+    vraw[i] = Wire.read();
+    //Serial.println(vraw[i]);
+    if(SIMULATE_VOLTAGE_READING) {vraw[i] = 128;} //use for testing
+   }
+   Wire.endTransmission();
 
-   return result;
+   return vraw;
 }
 
 int8_t Tget(uint8_t index) {
@@ -260,10 +288,20 @@ int8_t Tget(uint8_t index) {
 
 int32_t Iget(void) {
    //int32_t conversion_rate = 0;
-   //int32_t adc = ADCget(pin_Isense);
-   int32_t result = 0;//(conversion_rate * adc * VREF) / 1023;
+   int32_t adc = ADCget(pin_Isense);
+   //double  adcvolt = (double)adc * (double)VREF / 1024.0;
+   int32_t ref = ADCget(pin_Iref);
+   //double  adcref = (double)ref * (double)VREF / 1024.0;
+   //double  resvolt = adcvolt * 1000;
+   //double  result1 = 40000 * resvolt - 100000;
+   //int32_t result = ( (20000 * (adc - ref) * VREF) >> 10 );
    
-   return  result;
+   //return  (int32_t)result;
+   //adc = adc - (int32_t)122; //85 is the error for 0 A
+   //int32_t cur = map(adc,0,1023,100,-100);
+   int32_t volt = (adc * 4700) /1024;
+   //volt = map(volt,0,5000,-100,100);
+   return volt;
 }
 
 void MUXset(uint8_t index){
@@ -288,7 +326,8 @@ void CARstart(void) {
    digitalWrite(relay_precharge,RELAYOFF);
    digitalWrite(relay_array,RELAYON);
    BPS.is_started = 1;
-   return;
+   //int32_t zero_I = ADCget(pin_Isense);
+   //return zero_I;
 }
 
 void CARshutdown(uint8_t errorcd, uint8_t offender,uint32_t V, int8_t T, int32_t I) {
@@ -325,8 +364,20 @@ void SSEGwrite(uint8_t val) {
    uint8_t code1 = seg_table[dig1];
    uint8_t code2 = seg_table[dig2];
    if(val == SSEG_NOTHING){ code1 = 0x00; code2 = 0x00; }
-   I2Ctx(0x40, 0x12, code2, code1);
+   //I2Ctx(0x40, 0x12, code2, code1);
+   if(SSEG_RAW_ENABLE){SSEGwriteRAW(code1,code2);}
 
+   return;
+}
+
+void SSEGwriteRAW(uint8_t code1, uint8_t code2){
+   for(int i=0;i<7;i++){
+     digitalWrite(SSEG0 + i, bitRead(code2, i) );
+   }
+   for(int i=0;i<7;i++){
+     digitalWrite(SSEG1 + i, bitRead(code1, i) );
+   }
+   
    return;
 }
 
@@ -367,11 +418,11 @@ void ARRAYcheck(uint8_t i) {
 uint16_t ADCget(uint8_t pin) {
    uint8_t i = 0;
    uint32_t sum = 0;
-   for(i=0;i<10;i++) {
+   for(i=0;i<50;i++) {
       sum += analogRead(pin);
    }
 
-   return (uint16_t) sum / 10;
+   return (uint16_t) sum / 50;
 }
 
 void I2Ctx(unsigned char address, unsigned char reg, unsigned char data, unsigned char data2) {
@@ -383,6 +434,7 @@ void I2Ctx(unsigned char address, unsigned char reg, unsigned char data, unsigne
 
    return;
 }
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////end BPS.c///////////////////////////////////////////////////
@@ -433,10 +485,21 @@ NIL_WORKING_AREA(waThdVget, 128);
 NIL_THREAD(ThdVget, arg) {
  while (TRUE) {
    uint8_t i;
-   for(i = 0; i<BPS.num_modules; i++) {
-     BPS.V[i] = Vget(i);
-     nilThdSleepMilliseconds(20);
+   uint8_t j;
+   for(j=0;j<(BPS.num_modules / 12);j++){
+     uint8_t *vraw;
+     vraw = Vget(LIN_BOARD0_ADDR + j);
+     for(i=0;i<12;i++) {
+       uint16_t volt = (uint16_t) *(vraw + i*2 + 1) << 8;
+       volt = volt | *(vraw + i*2 + 2);
+       BPS.V[i*(j+1)] = (uint32_t) volt * 100;
+     }
+     nilThdSleepMilliseconds(40);
    }
+   //for(i = 0; i<BPS.num_modules; i++) {
+   //  BPS.V[i] = Vget(i);
+   
+   //}
    nilSemSignal(&semV);
  } // END WHILE
 }
